@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Yandex Map with Gas Stations</title>
+    <script src="https://api-maps.yandex.ru/2.1/?apikey=bd34617c-e628-4998-a57b-d13d77c2eaad&lang=ru_RU" type="text/javascript"></script>
+    <style>
+        /* Стиль карты */
+        #map {
+            width: 100vw; 
+            height: 80vh; 
+        }
+
+        /* Стиль контейнера для управления */
+        .controls {
+            padding: 10px;
+            text-align: center;
+        }
+
+        /* Стиль переключателя */
+        .toggle-label {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 10px 0;
+        }
+
+        .toggle-label input[type="checkbox"] {
+            margin-left: 10px;
+            transform: scale(1.5);
+        }
+    </style>
+</head>
+<body>
+    <div class="controls">
+        <label class="toggle-label">
+            <span>Оптимизировать маршрут (самый короткий путь)</span>
+            <input type="checkbox" id="optimizeRouteToggle" checked>
+        </label>
+    </div>
+
+    <div id="map"></div>
+
+    <script type="text/javascript">
+        ymaps.ready(init);
+
+        var points = [
+            { name: "Воронеж", coords: [51.660781, 39.200269] },  // Воронеж
+            { name: "Москва", coords: [55.755814, 37.617635] },   // Москва
+            { name: "Калуга", coords: [54.507219, 36.251593] },   // Калуга
+            { name: "Тула", coords: [54.192056, 37.615558] }      // Тула
+        ];
+
+        function init() {
+            var myMap = new ymaps.Map("map", {
+                center: [54.5, 37.0],
+                zoom: 6,
+                controls: [] // Убираем стандартные элементы управления
+            });
+
+            myMap.controls.add('zoomControl', {
+                size: 'small',
+                float: 'none',
+                position: { bottom: '30px', right: '10px' }
+            });
+
+            myMap.behaviors.disable('scrollZoom');
+
+            function calculateDistance(point1, point2) {
+                return ymaps.coordSystem.geo.getDistance(point1, point2);
+            }
+
+            function findShortestRoute(startPoint, remainingPoints) {
+                var currentPoint = startPoint;
+                var route = [currentPoint];
+
+                while (remainingPoints.length > 0) {
+                    var closestPoint = null;
+                    var minDistance = Infinity;
+                    var closestIndex = -1;
+
+                    for (var i = 0; i < remainingPoints.length; i++) {
+                        var distance = calculateDistance(currentPoint.coords, remainingPoints[i].coords);
+                        if (distance < minDistance) {
+                            minDistance = distance;
+                            closestPoint = remainingPoints[i];
+                            closestIndex = i;
+                        }
+                    }
+
+                    route.push(closestPoint);
+                    currentPoint = closestPoint;
+                    remainingPoints.splice(closestIndex, 1);
+                }
+
+                return route;
+            }
+
+            function getAddress(coords, callback) {
+                ymaps.geocode(coords).then(function(res) {
+                    var firstGeoObject = res.geoObjects.get(0);
+                    callback(firstGeoObject.getAddressLine());
+                });
+            }
+
+            function buildRoute() {
+                var optimizeRoute = document.getElementById('optimizeRouteToggle').checked ? 1 : 0;
+                var routeCoordinates;
+
+                if (optimizeRoute === 1) {
+                    var startPoint = points[0];
+                    var remainingPoints = points.slice(1);
+                    var optimalRoute = findShortestRoute(startPoint, remainingPoints);
+                    routeCoordinates = optimalRoute.map(function(point) {
+                        return point.coords;
+                    });
+                } else {
+                    routeCoordinates = points.map(function(point) {
+                        return point.coords;
+                    });
+                }
+
+                var multiRoute = new ymaps.multiRouter.MultiRoute({
+                    referencePoints: routeCoordinates,
+                    params: {
+                        routingMode: 'auto'
+                    }
+                }, {
+                    wayPointStartIconColor: 'transparent',
+                    wayPointFinishIconColor: 'transparent',
+                    wayPointIconLayout: 'empty',
+                    routeStrokeColor: '0000FF',
+                    routeActiveStrokeWidth: 8,
+                    boundsAutoApply: true
+                });
+
+                myMap.geoObjects.removeAll();
+                myMap.geoObjects.add(multiRoute);
+
+                // Добавление меток для каждой точки
+                points.forEach((point, index) => {
+                    getAddress(point.coords, function(address) {
+                        var placemark = new ymaps.Placemark(point.coords, {
+                            balloonContent: `
+                                <strong>${point.name}</strong><br>
+                                Адрес: ${address}<br>
+                                <button onclick="removePoint(${index})">Удалить точку</button>
+                            `,
+                            hintContent: point.name
+                        }, {
+                            iconLayout: 'default#image',
+                            iconImageHref: 'https://img.icons8.com/material-outlined/24/000000/place-marker.png',
+                            iconImageSize: [24, 24],
+                            iconImageOffset: [-12, -12]
+                        });
+
+                        myMap.geoObjects.add(placemark);
+                    });
+                });
+
+                // Поиск заправок вдоль маршрута
+                searchGasStations(routeCoordinates);
+            }
+
+            function searchGasStations(routeCoordinates) {
+                routeCoordinates.forEach(coords => {
+                    ymaps.geocode(coords, { results: 1 }).then(function(res) {
+                        var point = res.geoObjects.get(0);
+                        var bounds = point.geometry.getBounds();
+
+                        ymaps.geoQuery(
+                            ymaps.geoQuery().search({
+                                type: 'biz',
+                                ll: [bounds[0][0], bounds[0][1]],
+                                spn: [0.1, 0.1],
+                                categories: ['fuel']
+                            })
+                        ).then(function(result) {
+                            var gasStations = result.getTop(5); // Получаем 5 лучших заправок
+                            gasStations.each(function(item) {
+                                var coords = item.geometry.getCoordinates();
+                                var name = item.properties.get('name');
+                                var rating = item.properties.get('rating') || 'Нет рейтинга';
+
+                                // Добавляем метку для заправки
+                                var placemark = new ymaps.Placemark(coords, {
+                                    balloonContent: `
+                                        <strong>${name}</strong><br>
+                                        Рейтинг: ${rating}
+                                    `,
+                                    hintContent: name
+                                }, {
+                                    iconLayout: 'default#image',
+                                    iconImageHref: 'https://img.icons8.com/material-outlined/24/000000/gas-station.png', // Иконка для заправки
+                                    iconImageSize: [24, 24],
+                                    iconImageOffset: [-12, -12]
+                                });
+
+                                myMap.geoObjects.add(placemark);
+                            });
+                        });
+                    });
+                });
+            }
+
+            // Функция для удаления точки
+            window.removePoint = function(index) {
+                if (index >= 0 && index < points.length) {
+                    points.splice(index, 1); // Удаляем точку из массива
+                    buildRoute(); // Перестроение маршрута
+                }
+            }
+
+            document.getElementById('optimizeRouteToggle').addEventListener('change', buildRoute);
+
+            buildRoute();
+        }
+    </script>
+</body>
+</html>
